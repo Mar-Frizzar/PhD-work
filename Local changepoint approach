@@ -1,0 +1,153 @@
+#call the packages needed to run the analyses
+library(Rfast)
+library(pls)
+library(glmnet)
+library("readxl")
+library(dplyr)   # for data cleaning
+library(magrittr)
+library("parallel")
+library("yardstick")
+library(pls)
+library(changepoint)
+
+
+#################example with alpha_s1_casein###################################
+
+dataset = read_excel("")
+
+# Generic code set up
+target.col <- which( colnames(dataset)=="alpha_s1_casein" )
+dataset1 <- dataset
+colnames(dataset1)[target.col] <- "y"
+
+###create an empty matrix where to save the results
+
+n= as.numeric(nrow(dataset1))
+results.alpha_s1_casein<- matrix(NA, n, 7)
+colnames(results.alpha_s1_casein) <- c("y", "changepoint.plsr", "chnagepoint.nfact", "n neighbours", 
+                                       "loo.plsr", "loo.nfact", "Animal N")
+
+results.alpha_s1_casein[,7] <- dataset$Animal_No_
+
+###
+#calculate the PC of the spectra
+waves <- as.matrix(dataset1[,60:590]) #keep the wavelengths
+PCs <- prcomp(waves, scale = T) #estimate the PCs
+plot(PCs)
+PCs1 <- PCs$x
+PCs2 <- PCs1[,1:4] #Keep the first 4 PCs
+PCcov <- cov(PCs2)  #estimate the variance-covariance matrix
+
+for ( i in 1:n) {
+  #1- neighbours identification for each observation
+  target <- PCs2[i,]
+  
+  m.vals = mahala(PCs2, target, PCcov)
+  
+  dat1 <- cbind(dataset1, m.vals)
+  
+  m.vals1 <- sort(m.vals)
+  #use the changepoint approach to identify the number of neighbours
+  change.point <- cpt.mean(m.vals1,penalty="MBIC",pen.value=0,method="AMOC",Q=5,test.stat="Normal",class=TRUE,
+                           param.estimates=TRUE,minseglen=1)
+  change.point@cpts
+  num.neigh <- change.point@cpts[1]
+  
+  dat2 <- dat1[order(m.vals),]
+  
+  results.alpha_s1_casein[i,4] <- num.neigh
+  ###
+  #2-run the PLS analyses with with only the neighbours
+  
+  #General code
+  
+  train <- dat2[2:num.neigh,]
+  test <- dat2[1,]
+  
+  y.train = train$y            #vector of the reference data
+  x.train = as.matrix(train[,60:590])     #matrix of the spectra
+  x.test <- as.matrix(test[,60:590])
+  y.test <- test$y
+  results.alpha_s1_casein[i,1] <- y.test
+  num <- nrow(x.train)
+  
+  ###pls
+  
+  train.pls = data.frame(y = y.train)
+  train.pls$x = x.train
+  test.pls = data.frame(y = y.test)
+  test.pls$x = x.test
+  
+  # Possible number of PLS factors
+  # the number of factors need to be less than the number of neighbours, otherwise
+  # the analyses do not run
+  if ((num.neigh) > 21) {
+    num.fact <- 20
+  } else {
+    num.fact <- num.neigh - 2
+  }
+  
+  # Fit a PLS regression to identify the number of factors
+  # Use multiple cores for the CV if available
+  pls.options(parallel = makeCluster(detectCores(), type = "PSOCK"))
+  res.pls = pls::plsr(y ~ x, ncomp=num.fact, data = train.pls, validation = "LOO", scale = TRUE)
+  stopCluster(pls.options()$parallel)
+  
+  #Selection of the number of factors
+  summary(res.pls)  
+  press <- res.pls$validation["PRESS"]
+  press1 <- as.data.frame(press)
+  numFact <- as.numeric(which.min(press1))
+  results.alpha_s1_casein[i,3] <- numFact
+  
+  # Predict y hat in testing
+  results.alpha_s1_casein[i,2] <- predict(res.pls, ncomp = numFact, newdata = test.pls$x)
+  
+}
+
+#Run the PLSR analysis with all the records in the dataset
+# Generic code set up
+y.train = dataset$alpha_s1_casein            #vector of the reference data
+x.train = as.matrix(dataset[,60:590])     #matrix of the spectra
+
+train = cbind(y.train, x.train)
+train <- as.data.frame(train)
+
+for ( i in 1:n) {
+  
+  loop.train <- train[-i,]
+  x.train <- as.matrix(loop.train[,2:532])
+  y.train <- loop.train[,1]
+  loop.test <- train[i,]
+  x.test <-  as.matrix(loop.test[,2:532])
+  y.test <- loop.test[,1]
+  ##############################PLS###############################################
+  
+  
+  train.pls = data.frame(y = y.train)
+  train.pls$x = x.train
+  test.pls = data.frame(y = y.test)
+  test.pls$x = x.test
+  
+  # Fit a PLS regression to identify the number of factors
+  # Use multiple cores for the CV if available
+  pls.options(parallel = makeCluster(detectCores(), type = "PSOCK"))
+  res.pls = pls::plsr(y ~ x, ncomp=20, data = train.pls, validation = "LOO", scale = TRUE)
+  stopCluster(pls.options()$parallel)
+  
+  #Selection of the number of factors
+  summary(res.pls)  
+  press <- res.pls$validation["PRESS"]
+  press1 <- as.data.frame(press)
+  numFact <- as.numeric(which.min(press1))
+  results.alpha_s1_casein[i,6] <- numFact
+  
+  results.alpha_s1_casein[i,5] <- predict(res.pls, ncomp = numFact, newdata = test.pls$x)
+  
+}
+
+
+results.alpha_s1_casein <- as.data.frame(results.alpha_s1_casein)   #save the results table as data frame for export it
+
+library("writexl")
+write_xlsx(results.alpha_s1_casein,"U:/0731_MIR/Maria/paper 2 local approach/new results for milk quality traits/alpha_s1_casein.xlsx")  #export the results in excel file
